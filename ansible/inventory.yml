@@ -1,0 +1,16 @@
+all:
+  children:
+    gas2-vspc:
+      vars:
+        ansible_user: vsuser
+        ansible_ssh_pass: PostWin32
+        ansible_become: yes
+        ansible_become_method: sudo
+        ansible_become_password: PostWin32
+      children:
+        prod:
+          hosts:
+            gas2-vspc:
+              server_ip_part: 1
+              ansible_host: 37.0.1.10
+          

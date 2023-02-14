@@ -1,0 +1,177 @@
+- hosts: gas2-vspc
+  tasks:
+    - name: "Update hostanme"
+      hostname:
+        name: "{{ inventory_hostname }}"
+    - name: Set timezone to Europe/Moscow
+      timezone:
+        name: Europe/Moscow
+
+    - name: Update repositories cache and install "htop other" packages
+      register: should_reboot
+      apt:
+        pkg:
+          - htop        
+        cache_valid_time: 3600
+        update_cache: yes
+
+    - name: Setup netplan cam interface {{ cam_interface }}
+      template:
+        src: cam-network.yaml
+        dest:  /etc/netplan/01-network-manager-all.yaml
+      notify:
+      - Apply netplan
+
+    - name: Tune sysctl net.ipv4.conf.default.rp_filter = 0
+      register: should_reboot
+      sysctl:
+        name: net.ipv4.conf.default.rp_filter
+        value: '0'
+        state: present
+        sysctl_file: /etc/sysctl.d/10-network-security.conf
+
+    - name: Stop service ondemand
+      register: should_reboot
+      systemd:
+        name: ondemand
+        enabled: no
+
+    - name: Tune net.ipv4.tcp_syncookies = 1
+      register: should_reboot
+      sysctl:
+        name: net.ipv4.tcp_syncookies
+        value: '1'
+        state: present
+        sysctl_file: /etc/sysctl.d/10-network-security.conf
+
+    - name: Add the user 'user' to group 'video'
+      user:
+        name: user
+        groups: video
+        append: yes
+
+    - name: Start service dnsmasq, if not started
+      service:
+        name: dnsmasq
+        state: started
+
+  handlers:
+    - name: Apply netplan
+      command: sudo netplan apply
+      async: 45
+      poll: 0
+  
+    - name: Install docker & telegraf
+      apt:
+        pkg:
+          - docker-ce
+          - docker-ce-cli
+          - python3-pip
+          - telegraf
+        update_cache: yes
+
+    - name: install python docker bindnings
+      pip:
+        name: docker-py
+
+    - name: Creates directory for influx
+      file:
+        path: /srv/influxdb
+        state: directory
+
+    - name: Create influx db
+      docker_container:
+        name: influxdb
+        image: influxdb:1.8.1
+        restart_policy: always
+        state: started
+        env:
+          INFLUXDB_DB: "{{ influxdb }}"
+          INFLUXDB_USER: "{{ influxdb_user }}"
+          INFLUXDB_USER_PASSWORD: "{{ influxdb_password }}"
+          INFLUXDB_READ_USER: freader
+          INFLUXDB_READ_USER_PASSWORD: freaderPASS
+        ports:
+          - "0.0.0.0:8086:8086/tcp"
+        volumes:
+          - /srv/influxdb/data:/var/lib/influxdb
+
+    - name: install python influxdb bindnings
+      pip:
+        name: influxdb
+
+    - name: create 1 week retention policy
+      influxdb_retention_policy:
+        hostname: "127.0.0.1"
+        database_name: "{{ influxdb }}"
+        policy_name: default
+        default: true
+        udp_port: 1111
+        duration: 1w
+        replication: 1
+        use_udp: no
+        username: "{{ influxdb_user }}"
+        password: "{{ influxdb_password }}"
+
+    - name: Creates telegraf directory
+      file:
+        path: /etc/telegraf/
+        state: directory
+
+    - name: Setup telegraf.conf
+      register: restart_telegraf
+      template:
+        src: telegraf.conf
+        dest: /etc/telegraf/telegraf.conf
+
+    - name: Restart telegraf # noqa 503
+      when: restart_telegraf.changed
+      service:
+        name: telegraf
+        state: restarted
+
+    - name: Setup logrotate config
+      template:
+        src: farvater_logrotate
+        dest: /etc/logrotate.d/farvater_logrotate
+
+    - name: Setup rsyslog config
+      register: restart_rsyslog
+      template:
+        src: 31-farvater.conf
+        dest: /etc/rsyslog.d/31-farvater.conf
+
+    - name: Restart rsyslog # noqa 503
+      when: restart_rsyslog.changed
+      service:
+        name: rsyslog
+        state: restarted
+
+    - name: Creates farvater directory
+      file:
+        path: /etc/farvater/
+        state: directory
+
+    - name: Setup farvater reporting.json
+      template:
+        src: reporting.json
+        dest:  /etc/farvater/reporting.json
+
+    - name: Creates directory for grafana
+      file:
+        path: /srv/grafana
+        state: directory
+
+    - name: Create grafana
+      docker_container:
+        name: grafana
+        links:
+          influxdb
+        image: grafana/grafana:6.6.0
+        restart_policy: always
+        state: started
+        user: 0
+        ports:
+          - "0.0.0.0:3000:3000/tcp"
+        volumes:
+          - /srv/grafana/:/var/lib/grafana
